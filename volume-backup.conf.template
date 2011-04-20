@@ -1,0 +1,25 @@
+#Space separated list of volumes to backup
+vgs="vg_system_vg_data"
+# LVS to exclude/include
+lv_exclude=".*_snap|.*-snap|.*_swap|.*-swap|xen-test.*|test|.*_old"
+lv_include=".*"
+# Plain paths that should be saved
+plain_partitions="/boot"
+# backup method to use, see volume-backup.sh (e.g.: tar, rsync, ftp+gpg)
+method=tar
+# where do we push it?
+backup_host="root@dst_host"
+# dir where to place the backup
+dst_base_dir="/ext-backup/disk/yoda-new"
+# Where should the snap be mounted on the local host
+mountpoint=/mnt/backup_snap
+# AUtomatically override existing snapshots
+auto_override_snap=1
+# Size of the Snapshots
+lv_snapshot_size="5G"
+# Fail on all errors
+errors_fatal=1
+# for gpg methods who should be the recipient
+gpg_recipients="xx@example.com"
+# backup
+local_config_backup_dir="/offsite-backup/config"

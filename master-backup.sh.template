@@ -1,0 +1,122 @@
+#!/bin/bash
+
+master_backup_name="$1"
+
+if [ ! "$master_backup_name" ]; then
+	echo "Call syntax: $0 <backup_name>" >&2
+	exit 10
+fi
+
+my_dir=$(dirname "$(readlink -f "$0")")
+export PATH="$PATH:/usr/local/backup-queue:/usr/local/backup-queue/lib:$my_dir"
+config_file="/etc/backup-queue/${master_backup_name}.conf"
+lock_dir="/var/lock/master-backup"
+
+. $config_file
+export config_file metadata_file backup_queue
+
+if ! mkdir $lock_dir 2>/dev/null; then
+	if [ ! -e $lock_dir ]; then
+		echo "Cannot create lock dir $lock_dir: $!" >&2
+		exit 1
+	else
+		echo "Lock dir $lock_dir already exists on $(hostname). Master-Backup" >&2
+		echo "may be already running." >&2
+		echo "PID: $(cat $lock_dir/pid)" >&2
+		echo "Started: $(cat $lock_dir/started_at)" >&2
+		exit 2
+	fi
+fi
+
+echo $$ >$lock_dir/pid
+date > $lock_dir/started_at
+trap "rm -rf ${lock_dir}" SIGQUIT SIGINT SIGTERM ERR EXIT
+
+target="root@xwing"
+
+s() {
+	ssh $target "$@"
+}
+
+current_sn=$(s "/usr/local/ext-backup/ext-get-current-sn")
+expected_sn=$(get-next-harddrive)
+
+if [ ! "$current_sn" ]; then
+	echo "Keine Platte in $location_info eingelegt!?" >&2
+	exit 1
+fi
+
+current_name="$(get-harddrive-name $current_sn)"
+expected_name="$(get-harddrive-name $expected_sn)"
+
+if [ "$current_sn" != "$expected_sn" ]; then
+	echo "Falsche Platte eingelegt?!" >&2
+	echo "Erwartet:    $expected_name ($expected_sn)" >&2
+	echo "Gefunden:    $current_name ($current_sn)" >&2
+
+	echo "Fuer das manuelle Aendern der Reihenfolge $backup_queue auf $(hostname) editieren"
+
+	timestamp=$(date --rfc-3339=seconds)
+	echo "$timestamp Falsche Platte: expected $expected_name ($expected_sn) found: $current_name ($current_sn)"  >>/var/lib/backup/${master_backup_name}.log
+
+	exit 1
+fi
+
+s	"/usr/local/ext-backup/ext-autocheck-init-backup-disk $current_sn"
+rv=$?
+if [ $rv -gt 0 ]; then
+	echo "Error on precheck of $current_sn: $rv" >&2
+	echo "Error on precheck of backup hdd: $rv"  >>/var/lib/backup/${master_backup_name}.log
+	exit 1
+fi
+
+s	"/usr/local/ext-backup/ext-open-backup-disk"
+if [ $? -gt 0 ] ;then
+	echo "Fehler beim mounten der Backup-Platte" >&2
+	echo "Error mounting backup hdd"  >>/var/lib/backup/${master_backup_name}.log
+	exit 1
+fi
+
+if [ -z "$skip_yoda" ]; then
+	volume-backup.sh --config $my_dir/yoda-to-xwing.conf
+	result1=$?
+else
+	echo "Skipping yoda, as requested"
+	result1=0
+fi
+
+if [ -z "$skip_coruscant" ]; then
+	ssh root@coruscant "cd backup && ./volume-backup.sh --config /root/backup/xwing.conf"
+	result2=$?
+
+	if [ $result2 -gt $result1 ]; then
+		result=$result2
+	else
+		result=$result1
+	fi
+else
+	echo "Skipping coruscant, as requested"
+	restult2=0
+fi
+
+timestamp=$(date --rfc-3339=seconds)
+if [ $result -lt 0 ]; then
+        msg="ERR"
+elif [ $result -gt 0 ]; then
+        msg="WARN"
+else
+        msg="OK"
+fi
+
+echo "$timestamp $msg $result $current_sn $current_name" >/var/lib/backup/last-backup-state.${master_backup_name}
+echo "$timestamp $msg $current_sn $current_name"  >>/var/lib/backup/${master_backup_name}.log
+
+# wait for some time for xwing IO to die down
+sleep 30
+
+if [ $result -eq 0 ];then
+	send-eject-mail
+	rotate-queue
+fi
+
+s	"/usr/local/ext-backup/ext-close-backup-disk"
